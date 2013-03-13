@@ -3,56 +3,104 @@ package gototo
 import (
   "encoding/json"
   zmq "github.com/alecthomas/gozmq"
+  "runtime"
 )
 
 var registeredWorkerFunctions map[string]WorkerFunction = make(map[string]WorkerFunction)
-var controlChannel chan int = make(chan int)
+
+type WorkerCommand int
+const (
+  QUIT = WorkerCommand(-1)
+)
+
+type WorkerStatus int 
+const (
+  STOPPED = WorkerStatus(0)
+  RUNNING = WorkerStatus(1) 
+)
 
 type WorkerFunction func(interface{}, func(interface{}))
+
+func RunRouter(routerAddress, dealerAddress string, routerBind, dealerBind bool) error {
+  context, _ := zmq.NewContext()
+  defer context.Close()
+  router, _ := context.NewSocket(zmq.ROUTER)
+  defer router.Close()
+  if routerBind {
+    router.Bind(routerAddress)
+  } else {
+    router.Connect(routerAddress)
+  }
+  dealer, _ := context.NewSocket(zmq.DEALER)
+  defer dealer.Close()
+  if dealerBind {
+    dealer.Bind(dealerAddress)
+  } else {
+    dealer.Connect(dealerAddress)
+  }
+  return zmq.Device(zmq.QUEUE, router, dealer)
+}
 
 func RegisterWorkerFunction(name string, workerFunction WorkerFunction) {
   registeredWorkerFunctions[name] = workerFunction
 }
 
-func RunWorker(address string, quit chan int) {
+func RunWorker(address string, control chan WorkerCommand, status chan WorkerStatus) {
+  defer func () {status <- STOPPED}()
   context, _ := zmq.NewContext()
   defer context.Close()
-  router, _ := context.NewSocket(zmq.ROUTER)
-  defer router.Close()
-  router.SetSockOptInt(zmq.RCVTIMEO, 100)
-  router.Bind(address)
-  var responseChannel = make(chan [][]byte)
+  socket, _ := context.NewSocket(zmq.REP)
+  defer socket.Close()
+  socket.SetSockOptInt(zmq.RCVTIMEO, 100)
+  socket.Connect(address)
+  var responseChannel = make(chan []byte)
+  status <- RUNNING
   for {
     select {
-    case response := <-responseChannel:
-      router.SendMultipart(response, 0)
-    case <-quit:
+    case <-control:
       return
     default:
-      message, a := router.RecvMultipart(0)
-      if a != nil {
+      message, e := socket.RecvMultipart(0)
+      if e != nil {
         break
       }
       data := map[string]interface{}{}
+      callback := func(response interface{}) {
+        responseMessage, _ := json.Marshal(response)
+        responseChannel <- responseMessage
+      }
       json.Unmarshal(message[len(message)-1], &data)
       workerFunction := registeredWorkerFunctions[data["method"].(string)]
-      callback := func(c chan [][]byte) func(interface{}) {
-        m := message
-        cb := func(response interface{}) {
-          m[len(m)-1], _ = json.Marshal(response)
-          c <- m
-        }
-        return cb
-      }(responseChannel)
-      workerFunction(data["parameters"], callback)
+      go workerFunction(data["parameters"], callback)
+      response := <-responseChannel
+      message[len(message)-1] = response
+      socket.SendMultipart(message, 0)
     }
   }
 }
 
-func StartWorker(address string) {
-  go RunWorker(address, controlChannel)
+func StartWorker(address string) (WorkerStatus, chan WorkerCommand, chan WorkerStatus) {
+  controlChannel := make(chan WorkerCommand)
+  statusChannel := make(chan WorkerStatus)
+  go RunWorker(address, controlChannel, statusChannel)
+  return <- statusChannel, controlChannel, statusChannel
 }
 
-func StopWorker() {
-  controlChannel <- 1
+func RunWorkerServer(routerAddress, internalAddress string, routerBind bool, count int) {
+  go RunRouter(routerAddress, internalAddress, routerBind, true)
+  RunWorkers(internalAddress, count)
+}
+
+func RunWorkers(address string, count int) {
+  if count <= 0 {
+    count = runtime.NumCPU()
+  }
+  statusChannels := make([]chan WorkerStatus, count)
+  for i := 0; i < count; i++ {
+    _, _, statusChannel := StartWorker(address)
+    statusChannels[i] = statusChannel
+  }
+  for _, c := range statusChannels {
+    <- c
+  }
 }
