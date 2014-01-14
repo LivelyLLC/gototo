@@ -2,8 +2,9 @@ package gototo
 
 import (
   "encoding/json"
-  zmq "github.com/alecthomas/gozmq"
+  zmq "github.com/JeremyOT/gozmq"
   "runtime"
+  "log"
 )
 
 var registeredWorkerFunctions map[string]WorkerFunction = make(map[string]WorkerFunction)
@@ -18,6 +19,20 @@ const (
   STOPPED = WorkerStatus(0)
   RUNNING = WorkerStatus(1) 
 )
+
+var logger *log.Logger
+
+func SetLogger(l *log.Logger) {
+  logger = l
+}
+
+func writeLog(message ...interface{}) {
+  if logger != nil {
+    logger.Println(message)
+  } else {
+    println(message)
+  }
+}
 
 type WorkerFunction func(interface{}, func(interface{}))
 
@@ -70,7 +85,15 @@ func RunWorker(address string, control chan WorkerCommand, status chan WorkerSta
         responseChannel <- responseMessage
       }
       json.Unmarshal(message[len(message)-1], &data)
+      if data == nil {
+        writeLog("Received invalid message")
+        continue
+      }
       workerFunction := registeredWorkerFunctions[data["method"].(string)]
+      if workerFunction == nil {
+        writeLog("Unregistered worker function:", data["method"].(string))
+        continue
+      }
       go workerFunction(data["parameters"], callback)
       response := <-responseChannel
       message[len(message)-1] = response
