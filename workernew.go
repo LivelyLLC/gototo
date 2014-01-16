@@ -1,4 +1,4 @@
-// +build !new
+// +build new
 
 package gototo
 
@@ -38,7 +38,7 @@ func writeLog(message ...interface{}) {
 	}
 }
 
-type WorkerFunction func(interface{}, func(interface{}))
+type WorkerFunction func(interface{}) interface{}
 
 func RunRouter(routerAddress, dealerAddress string, routerBind, dealerBind bool) error {
 	context, _ := zmq.NewContext()
@@ -72,7 +72,6 @@ func RunWorker(address string, control chan WorkerCommand, status chan WorkerSta
 	defer socket.Close()
 	socket.SetSockOptInt(zmq.RCVTIMEO, 100)
 	socket.Connect(address)
-	var responseChannel = make(chan []byte)
 	status <- RUNNING
 	for {
 		select {
@@ -84,10 +83,6 @@ func RunWorker(address string, control chan WorkerCommand, status chan WorkerSta
 				break
 			}
 			data := map[string]interface{}{}
-			callback := func(response interface{}) {
-				responseMessage, _ := json.Marshal(response)
-				responseChannel <- responseMessage
-			}
 			json.Unmarshal(message[len(message)-1], &data)
 			if data == nil {
 				writeLog("Received invalid message")
@@ -98,9 +93,9 @@ func RunWorker(address string, control chan WorkerCommand, status chan WorkerSta
 				writeLog("Unregistered worker function:", data["method"].(string))
 				continue
 			}
-			go workerFunction(data["parameters"], callback)
-			response := <-responseChannel
-			message[len(message)-1] = response
+			response := workerFunction(data["parameters"])
+			responseData, _ := json.Marshal(response)
+			message[len(message)-1] = responseData
 			socket.SendMultipart(message, 0)
 		}
 	}
