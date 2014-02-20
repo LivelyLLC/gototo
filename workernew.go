@@ -9,28 +9,6 @@ import (
 	"runtime"
 )
 
-var registeredWorkerFunctions map[string]WorkerFunction = make(map[string]WorkerFunction)
-var activeTimeout = 1
-var passiveTimeout = 100
-
-type WorkerCommand int
-
-const (
-	QUIT = WorkerCommand(-1)
-)
-
-type WorkerStatus int
-
-type WorkerResponse struct {
-	message [][]byte
-	response interface{}
-}
-
-const (
-	STOPPED = WorkerStatus(0)
-	RUNNING = WorkerStatus(1)
-)
-
 var logger *log.Logger
 
 func SetLogger(l *log.Logger) {
@@ -44,6 +22,10 @@ func writeLog(message ...interface{}) {
 		println(message)
 	}
 }
+
+var registeredWorkerFunctions map[string]WorkerFunction = make(map[string]WorkerFunction)
+var activeTimeout = 1
+var passiveTimeout = 100
 
 type WorkerFunction func(interface{}) interface{}
 
@@ -71,9 +53,11 @@ func RegisterWorkerFunction(name string, workerFunction WorkerFunction) {
 	registeredWorkerFunctions[name] = workerFunction
 }
 
-func callworker(responseChannel chan *WorkerResponse, message [][]byte, parameters interface{}, workerFunction WorkerFunction) {
+func callworker(responseChannel chan [][]byte, message [][]byte, parameters interface{}, workerFunction WorkerFunction) {
 	response := workerFunction(parameters)
-	responseChannel <- &WorkerResponse {message: message, response: response}
+	responseData, _ := json.Marshal(response)
+	message[len(message)-1] = responseData
+	responseChannel <- message
 }
 
 func RunWorker(address string, numWorkers int, quit chan int, wait chan int) {
@@ -85,12 +69,10 @@ func RunWorker(address string, numWorkers int, quit chan int, wait chan int) {
 	socket.SetSockOptInt(zmq.RCVTIMEO, passiveTimeout)
 	socket.Bind(address)
 	runningWorkers := 0
-	responseChannel := make(chan *WorkerResponse)
-	sendResponse := func(response *WorkerResponse) {
+	responseChannel := make(chan [][]byte)
+	sendResponse := func(response [][]byte) {
 			runningWorkers -= 1
-			responseData, _ := json.Marshal(response.response)
-			response.message[len(response.message)-1] = responseData
-			socket.SendMultipart(response.message, 0)
+			socket.SendMultipart(response, 0)
 			if runningWorkers == 0 {
 				socket.SetSockOptInt(zmq.RCVTIMEO, passiveTimeout)
 			}
