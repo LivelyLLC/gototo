@@ -71,24 +71,24 @@ func RunWorker(address string, numWorkers int, quit chan int, wait chan int) {
 	runningWorkers := 0
 	responseChannel := make(chan [][]byte)
 	sendResponse := func(response [][]byte) {
-			runningWorkers -= 1
-			socket.SendMultipart(response, 0)
-			if runningWorkers == 0 {
-				socket.SetSockOptInt(zmq.RCVTIMEO, passiveTimeout)
-			}
+		runningWorkers -= 1
+		socket.SendMultipart(response, 0)
+		if runningWorkers == 0 {
+			socket.SetSockOptInt(zmq.RCVTIMEO, passiveTimeout)
+		}
 	}
 	for {
 		if runningWorkers == numWorkers {
 			select {
-				case response := <-responseChannel:
-					sendResponse(response)
-				case <- quit:
-					return
+			case response := <-responseChannel:
+				sendResponse(response)
+			case <-quit:
+				return
 			}
 			continue
 		}
 		select {
-		case <- quit:
+		case <-quit:
 			return
 		case response := <-responseChannel:
 			sendResponse(response)
