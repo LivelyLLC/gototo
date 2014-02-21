@@ -33,15 +33,15 @@ func RunRouter(routerAddress, dealerAddress string, routerBind, dealerBind bool)
 type WorkerFunction func(interface{}) interface{}
 
 type Worker struct {
-	logger *log.Logger
+	logger                    *log.Logger
 	registeredWorkerFunctions map[string]WorkerFunction
-	activeTimeout int
-	passiveTimeout int
-	quit chan int
-	wait chan int
-	address string
-	maxWorkers int
-	runningWorkers int
+	activeTimeout             int
+	passiveTimeout            int
+	quit                      chan int
+	wait                      chan int
+	address                   string
+	maxWorkers                int
+	runningWorkers            int
 }
 
 // Create a new worker bound to address that will run at most count functions at a time.
@@ -51,12 +51,12 @@ func New(address string, count int) *Worker {
 		count = runtime.NumCPU()
 	}
 	return &Worker{registeredWorkerFunctions: make(map[string]WorkerFunction),
-		activeTimeout: 1,
+		activeTimeout:  1,
 		passiveTimeout: 100,
-		quit: make(chan int),
-		wait: make(chan int),
-		maxWorkers: count,
-		address: address,
+		quit:           make(chan int),
+		wait:           make(chan int),
+		maxWorkers:     count,
+		address:        address,
 	}
 }
 
@@ -127,6 +127,10 @@ func (w *Worker) Run() {
 		default:
 			message, err := socket.RecvMultipart(0)
 			if err != nil {
+				// Needed to yield to goroutines when GOMAXPROCS is 1.
+				// Note: The 1.2 preemptive scheduler doesn't seem to work here,
+				// so this is still required.
+				runtime.Gosched()
 				break
 			}
 			data := map[string]interface{}{}
@@ -148,4 +152,3 @@ func (w *Worker) Run() {
 		}
 	}
 }
-
