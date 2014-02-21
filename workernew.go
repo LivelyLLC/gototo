@@ -85,7 +85,6 @@ func RunWorker(address string, numWorkers int, quit chan int, wait chan int) {
 			case <-quit:
 				return
 			}
-			continue
 		}
 		select {
 		case <-quit:
@@ -96,6 +95,9 @@ func RunWorker(address string, numWorkers int, quit chan int, wait chan int) {
 		default:
 			message, err := socket.RecvMultipart(0)
 			if err != nil {
+				// Yield to other goroutines. The 1.2 pre-emptive scheduler doesn't 
+				// always work here. Older versions require it.
+				runtime.Gosched()
 				break
 			}
 			data := map[string]interface{}{}
@@ -118,7 +120,7 @@ func RunWorker(address string, numWorkers int, quit chan int, wait chan int) {
 	}
 }
 
-func RunWorkerServer(routerAddress, internalAddress string, routerBind bool, count int) {
+func RunWorkerServer(routerAddress string, routerBind bool, count int) {
 	if count <= 0 {
 		count = runtime.NumCPU()
 	}
