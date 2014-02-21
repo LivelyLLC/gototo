@@ -9,26 +9,7 @@ import (
 	"runtime"
 )
 
-var logger *log.Logger
-
-func SetLogger(l *log.Logger) {
-	logger = l
-}
-
-func writeLog(message ...interface{}) {
-	if logger != nil {
-		logger.Println(message)
-	} else {
-		println(message)
-	}
-}
-
-var registeredWorkerFunctions map[string]WorkerFunction = make(map[string]WorkerFunction)
-var activeTimeout = 1
-var passiveTimeout = 100
-
-type WorkerFunction func(interface{}) interface{}
-
+// Run a ZMQ router->dealer at the specified addresses.
 func RunRouter(routerAddress, dealerAddress string, routerBind, dealerBind bool) error {
 	context, _ := zmq.NewContext()
 	defer context.Close()
@@ -49,45 +30,96 @@ func RunRouter(routerAddress, dealerAddress string, routerBind, dealerBind bool)
 	return zmq.Device(zmq.QUEUE, router, dealer)
 }
 
-func RegisterWorkerFunction(name string, workerFunction WorkerFunction) {
-	registeredWorkerFunctions[name] = workerFunction
+type WorkerFunction func(interface{}) interface{}
+
+type Worker struct {
+	logger *log.Logger
+	registeredWorkerFunctions map[string]WorkerFunction
+	activeTimeout int
+	passiveTimeout int
+	quit chan int
+	wait chan int
+	address string
+	maxWorkers int
+	runningWorkers int
 }
 
-func callworker(responseChannel chan [][]byte, message [][]byte, parameters interface{}, workerFunction WorkerFunction) {
+// Create a new worker bound to address that will run at most count functions at a time.
+// If count == 0, it will default to runtime.NumCPU().
+func New(address string, count int) *Worker {
+	if count == 0 {
+		count = runtime.NumCPU()
+	}
+	return &Worker{registeredWorkerFunctions: make(map[string]WorkerFunction),
+		activeTimeout: 1,
+		passiveTimeout: 100,
+		quit: make(chan int),
+		wait: make(chan int),
+		maxWorkers: count,
+		address: address,
+	}
+}
+
+func (w *Worker) Quit() {
+	w.quit <- 1
+}
+
+func (w *Worker) Wait() {
+	<-w.wait
+}
+
+func (w *Worker) SetLogger(l *log.Logger) {
+	w.logger = l
+}
+
+func (w *Worker) writeLog(message ...interface{}) {
+	if w.logger != nil {
+		w.logger.Println(message)
+	} else {
+		log.Println(message)
+	}
+}
+
+func (w *Worker) RegisterWorkerFunction(name string, workerFunction WorkerFunction) {
+	w.registeredWorkerFunctions[name] = workerFunction
+}
+
+// Run a worker function and send the response to responseChannel
+func runFunction(responseChannel chan [][]byte, message [][]byte, parameters interface{}, workerFunction WorkerFunction) {
 	response := workerFunction(parameters)
 	responseData, _ := json.Marshal(response)
 	message[len(message)-1] = responseData
 	responseChannel <- message
 }
 
-func RunWorker(address string, numWorkers int, quit chan int, wait chan int) {
-	defer func() { close(wait) }()
+func (w *Worker) Run() {
+	defer func() { close(w.wait) }()
 	context, _ := zmq.NewContext()
 	defer context.Close()
 	socket, _ := context.NewSocket(zmq.ROUTER)
 	defer socket.Close()
-	socket.SetSockOptInt(zmq.RCVTIMEO, passiveTimeout)
-	socket.Bind(address)
-	runningWorkers := 0
+	socket.SetSockOptInt(zmq.RCVTIMEO, w.passiveTimeout)
+	socket.Bind(w.address)
+	w.runningWorkers = 0
 	responseChannel := make(chan [][]byte)
 	sendResponse := func(response [][]byte) {
-		runningWorkers -= 1
+		w.runningWorkers -= 1
 		socket.SendMultipart(response, 0)
-		if runningWorkers == 0 {
-			socket.SetSockOptInt(zmq.RCVTIMEO, passiveTimeout)
+		if w.runningWorkers == 0 {
+			socket.SetSockOptInt(zmq.RCVTIMEO, w.passiveTimeout)
 		}
 	}
 	for {
-		if runningWorkers == numWorkers {
+		if w.runningWorkers == w.maxWorkers {
 			select {
 			case response := <-responseChannel:
 				sendResponse(response)
-			case <-quit:
+			case <-w.quit:
 				return
 			}
 		}
 		select {
-		case <-quit:
+		case <-w.quit:
 			return
 		case response := <-responseChannel:
 			sendResponse(response)
@@ -95,37 +127,25 @@ func RunWorker(address string, numWorkers int, quit chan int, wait chan int) {
 		default:
 			message, err := socket.RecvMultipart(0)
 			if err != nil {
-				// Yield to other goroutines. The 1.2 pre-emptive scheduler doesn't 
-				// always work here. Older versions require it.
-				runtime.Gosched()
 				break
 			}
 			data := map[string]interface{}{}
 			json.Unmarshal(message[len(message)-1], &data)
 			if data == nil {
-				writeLog("Received invalid message")
+				w.writeLog("Received invalid message")
 				break
 			}
-			workerFunction := registeredWorkerFunctions[data["method"].(string)]
+			workerFunction := w.registeredWorkerFunctions[data["method"].(string)]
 			if workerFunction == nil {
-				writeLog("Unregistered worker function:", data["method"].(string))
+				w.writeLog("Unregistered worker function:", data["method"].(string))
 				break
 			}
-			if runningWorkers == 0 {
-				socket.SetSockOptInt(zmq.RCVTIMEO, activeTimeout)
+			if w.runningWorkers == 0 {
+				socket.SetSockOptInt(zmq.RCVTIMEO, w.activeTimeout)
 			}
-			runningWorkers += 1
-			go callworker(responseChannel, message, data["parameters"], workerFunction)
+			w.runningWorkers += 1
+			go runFunction(responseChannel, message, data["parameters"], workerFunction)
 		}
 	}
 }
 
-func RunWorkerServer(routerAddress string, routerBind bool, count int) {
-	if count <= 0 {
-		count = runtime.NumCPU()
-	}
-	quit := make(chan int)
-	wait := make(chan int)
-	RunWorker(routerAddress, count, quit, wait)
-	<-wait
-}
