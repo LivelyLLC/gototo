@@ -4,7 +4,7 @@ package gototo
 
 import (
 	"encoding/json"
-	zmq "github.com/JeremyOT/gozmq"
+	zmq "github.com/alecthomas/gozmq"
 	"log"
 	"runtime"
 )
